@@ -15,6 +15,68 @@ PRIVATE_KEY = os.getenv("OCI_APM_PRIVATE_DATAKEY")
 # OCI APM Private OTel Trace Path
 OTEL_PATH = "/20200101/opentelemetry/private/v1/traces"
 
+
+def _get_oci_client(client_class, **extra_kwargs):
+    """Create OCI SDK client with 4-tier auth fallback.
+
+    1. Resource Principal (OCI_RESOURCE_PRINCIPAL_VERSION set)
+    2. Instance Principal (OCI_AUTH_MODE=instance_principal)
+    3. OCI config file (~/.oci/config)
+    4. Environment variables (OCI_KEY_FILE/OCI_KEY_CONTENT)
+    """
+    import oci
+    auth_mode = os.getenv("OCI_AUTH_MODE", "").lower().replace("-", "_")
+
+    # 1. Resource Principal
+    if os.getenv("OCI_RESOURCE_PRINCIPAL_VERSION"):
+        try:
+            signer = oci.auth.signers.get_resource_principals_signer()
+            return client_class({}, signer=signer, **extra_kwargs)
+        except Exception:
+            pass
+
+    # 2. Instance Principal
+    if auth_mode in ("instance_principal", "instanceprincipal", "auto"):
+        try:
+            signer = oci.auth.signers.InstancePrincipalsSecurityTokenSigner()
+            return client_class({}, signer=signer, **extra_kwargs)
+        except Exception:
+            if auth_mode != "auto":
+                pass
+
+    # 3. OCI config file
+    try:
+        profile = os.getenv("OCI_CONFIG_PROFILE", "DEFAULT")
+        config = oci.config.from_file(profile_name=profile)
+        return client_class(config, **extra_kwargs)
+    except Exception:
+        pass
+
+    # 4. Environment variables
+    key_file = os.getenv("OCI_KEY_FILE")
+    key_content = os.getenv("OCI_KEY_CONTENT")
+    if key_file or key_content:
+        try:
+            if key_file:
+                with open(os.path.expanduser(key_file)) as f:
+                    key_pem = f.read()
+            else:
+                key_pem = key_content.replace("\\n", "\n")
+            config = {
+                "user": os.environ["OCI_USER_OCID"],
+                "key_content": key_pem,
+                "fingerprint": os.environ["OCI_FINGERPRINT"],
+                "tenancy": os.environ["OCI_TENANCY_OCID"],
+                "region": os.environ["OCI_REGION"],
+                "pass_phrase": os.getenv("OCI_KEY_PASSPHRASE", ""),
+            }
+            return client_class(config, **extra_kwargs)
+        except Exception:
+            pass
+
+    return None
+
+
 class APMUploader:
     def __init__(self):
         self.session = requests.Session()
@@ -44,13 +106,13 @@ class APMUploader:
     def upload_oci_metrics(self, file_path):
         import oci
         from oci.monitoring.models import PostMetricDataDetails, MetricDataDetails, Datapoint
-        try:
-            config = oci.config.from_file()
-        except:
-            print("  OCI Config not found, skipping Monitoring.")
+
+        region = os.getenv("OCI_REGION", "eu-frankfurt-1")
+        endpoint = f"https://telemetry-ingestion.{region}.oraclecloud.com"
+        client = _get_oci_client(oci.monitoring.MonitoringClient, service_endpoint=endpoint)
+        if not client:
+            print("  OCI auth not available, skipping Monitoring metrics upload.")
             return
-        
-        client = oci.monitoring.MonitoringClient(config, service_endpoint="https://telemetry-ingestion.eu-frankfurt-1.oraclecloud.com")
         print(f"Uploading OCI metrics from {file_path}...")
         
         metrics_batch = []
@@ -83,14 +145,13 @@ class APMUploader:
 
     def upload_app_logs(self, file_path, source_name="Observability_Demo_App_Logs"):
         import oci
-        try:
-            config = oci.config.from_file()
-        except: return
+        client = _get_oci_client(oci.log_analytics.LogAnalyticsClient)
+        if not client:
+            return
         namespace = os.getenv("LOG_ANALYTICS_NAMESPACE")
         log_group_id = os.getenv("LOG_ANALYTICS_LOG_GROUP_ID")
-        if not namespace or not log_group_id or "your_" in namespace: return
-        
-        client = oci.log_analytics.LogAnalyticsClient(config)
+        if not namespace or not log_group_id or "your_" in namespace:
+            return
         print(f"Uploading logs to Log Analytics (Source: {source_name})...")
         with open(file_path, 'rb') as f:
             try:
