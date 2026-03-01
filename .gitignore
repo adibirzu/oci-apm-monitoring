@@ -1,0 +1,26 @@
+# Secrets
+.env.local
+.env
+*.pem
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Tool state
+.serena/
+.agents/
+
+# Synthetic data output
+synthetic_apm_data/output/
